@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: MIT
+# S20P (Super Gateway S20P / MT7986 / eMMC) U-Boot + ATF 专用编译
+name: S20P-UBOOT
+
+on:
+  workflow_dispatch:
+    inputs:
+      WRT_VER:
+        description: 'ATF/U-Boot 版本'
+        required: true
+        default: 'SP1'
+        type: choice
+        options:
+          - SP1
+          - '2025'
+          - SP2
+
+env:
+  GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+  WRT_TARGET: MTK-7986-S20P
+  WRT_REPO: https://github.com/Yuzhii0718/bl-mt798x-dhcpd.git
+  WRT_BRANCH: master
+  SOC: mt7986
+  BOARD: clx_s20
+
+permissions: write-all
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Projects
+        uses: actions/checkout@main
+
+      - name: Initialization Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt -yqq purge firefox
+          sudo -E apt -yqq update
+          sudo -E apt -yqq install dos2unix bison build-essential device-tree-compiler flex gcc-aarch64-linux-gnu libssl-dev qemu-user-static zip
+          sudo -E systemctl daemon-reload
+          sudo -E timedatectl set-timezone "Asia/Shanghai"
+          node --version
+          npm --version
+
+      - name: Initialization Values
+        run: |
+          echo "WRT_AUTHOR=$(echo $WRT_REPO | cut -d '/' -f 4)" >> $GITHUB_ENV
+          echo "WRT_DATE=$(TZ=UTC-8 date +"%y.%m.%d")" >> $GITHUB_ENV
+          echo "WRT_VER=$(echo '${{ inputs.WRT_VER }}' | tr 'a-z' 'A-Z')" >> $GITHUB_ENV
+          echo "WRT_HASH=$(echo '${{ github.sha }}')" >> $GITHUB_ENV
+
+      - name: Clone Code
+        run: |
+          git clone --depth=1 --single-branch --branch $WRT_BRANCH $WRT_REPO ./wrt/
+          cd ./wrt/
+          echo "WRT_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Compile U-Boot + ATF
+        run: |
+          cd ./wrt/
+          chmod +x build.sh
+          SOC=$SOC BOARD=$BOARD VERSION=$WRT_VER ./build.sh
+
+      - name: Package Firmware
+        run: |
+          cd ./wrt/ && mkdir -p ./upload/
+
+          for FILE in $(find ./output/ -type f) ; do
+            EXT=$(basename $FILE | cut -d '.' -f 2-)
+            NAME=$(basename $FILE | cut -d '.' -f 1)
+            mv -f $FILE ./upload/$NAME.$EXT
+          done
+
+          ls -l ./upload/
+          ( cd ./upload && md5sum *.bin *.img > MD5SUMS.txt && cat MD5SUMS.txt )
+          zip -r ./upload/"$WRT_TARGET"-"$WRT_VER"-"$WRT_DATE".zip ./upload/*.bin ./upload/*.img ./upload/MD5SUMS.txt
+
+      - name: Release Firmware
+        uses: softprops/action-gh-release@master
+        with:
+          tag_name: S20P-UBOOT-${{env.WRT_VER}}-${{env.WRT_DATE}}
+          files: |
+            ./wrt/upload/*.bin
+            ./wrt/upload/*.img
+            ./wrt/upload/*.zip
+            ./wrt/upload/MD5SUMS.txt
+          body: |
+            Super Gateway **S20P** 的 U-Boot + ATF 编译产物（MT7986 / eMMC）
+
+            设备：Super Gateway S20P（uboot 板型名 `clx_s20`）
+            平台：${{env.WRT_TARGET}}
+            版本：${{env.WRT_VER}}
+            源码：${{env.WRT_REPO}}
+            分支：${{env.WRT_BRANCH}}
+            提交：${{env.WRT_COMMIT}}
+            日期：${{env.WRT_DATE}}
+
+            **文件名说明**
+            - `fip-mt7986_clx_s20_*-fixed-parts_md5-*.bin` → fip 分区（BL31 + U-Boot）
+            - `bl2-mt7986_clx_s20_*.img` → BL2 引导（secure boot 关闭时才产出）
+
+            **刷写提示**
+            - U-Boot 能正常启动就不需要动 BL2，只刷 fip 即可。
+            - eMMC 设备请按 GPT 分区表（mt798x_gpt/mt7986-clx_s20p.json）写 fip 分区，起始 LBA 13312。
+            - 刷机有风险，请先备份原厂分区。
